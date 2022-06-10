@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Author: nevermore
+"""
+learn with https://github.com/flaviagiammarino/nbeats-tensorflow
+I switch this code to Keras Model ,so I can use nbeats as a layer in complex model
+"""
+import pandas as pd
+import numpy as np
+from tensorflow.keras.layers import Input, Dense, Subtract, Add
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import Callback
+from tensorflow import keras
+
+pd.options.mode.chained_assignment = None
+from Nbeats_utils import cast_target_to_array, get_training_sequences, get_time_indices
+from Nbeats_block import trend_layer, seasonality_layer, generic_layer
+
+class nbeats(keras.Model):
+
+    def __init__(self,
+                 forecast_period: int,
+                 lookback_period: int,
+                 name: str,
+                 num_trend_coefficients: int = 3,
+                 num_seasonal_coefficients: int = 5,
+                 num_generic_coefficients: int = 7,
+                 units=100,
+                 stacks: list = ['trend', 'seasonality'],
+                 num_blocks_per_stack: int = 3,
+                 share_weights: bool = True,
+                 share_coefficients :bool = True,
+                 **kwargs):
+        super(nbeats, self).__init__(name=name, **kwargs)
+
+        '''
+        Implementation of univariate time series forecasting model introduced in Oreshkin, B. N., Carpov, D.,
+        Chapados, N., & Bengio, Y. (2019). N-BEATS: Neural basis expansion analysis for interpretable time
+        series forecasting. https://arxiv.org/abs/1905.10437.
+        Parameters:
+        __________________________________
+        y: np.array, pd.Series, list.
+            Time series.
+        forecast_period: int.
+            Length of forecast period.
+        lookback_period: int.
+            Length of lookback period.
+        num_trend_coefficients: int.
+            Number of basis expansion coefficients of the trend block. This is the number of polynomial terms
+            used for modelling the trend component. Only used when the model includes a trend stack.
+        num_seasonal_coefficients: int.
+            Number of basis expansion coefficients of the seasonality block. This is the number of Fourier terms
+            used for modelling the seasonal component. Only used when the model includes a seasonality stack.
+        num_generic_coefficients: int.
+            Number of basis expansion coefficients of the generic block. This is the number of linear terms used
+            for modelling the generic component. Only used when the model includes a generic stack.
+        units: int.
+            Number of hidden units of each of the 4 layers of the fully connected stack.
+        stacks: list of strings.
+            The length of the list is the number of stacks, the items in the list are strings identifying the
+            stack types (either 'trend', 'seasonality' or 'generic').
+        num_blocks_per_stack: int.
+            The number of blocks in each stack.
+        share_weights: bool.
+            True if the weights of the 4 layers of the fully connected stack should be shared by the different
+            blocks inside the same stack, False otherwise.
+        share_coefficients: bool.
+            True if the forecast and backcast of each block should share the same basis expansion coefficients,
+            False otherwise.
+        '''
+        self.num_trend_coefficients = num_trend_coefficients
+        self.num_seasonal_coefficients = num_seasonal_coefficients
+        self.units = units
+        self.stacks = stacks
+        self.share_weights = share_weights
+        self.num_generic_coefficients = num_generic_coefficients
+        self.num_blocks_per_stack = num_blocks_per_stack
+        self.share_coefficients = share_coefficients
+
+
+        if self.share_weights:
+            self.d1 = []
+            self.d2 = []
+            self.d3 = []
+            self.d4 = []
+            self.d10 = Dense(units=units, activation='relu')
+            for i in range(len(stacks)):
+                self.d1.append(Dense(units=units, activation='relu'))
+                self.d2.append(Dense(units=units, activation='relu'))
+                self.d3.append(Dense(units=units, activation='relu'))
+                self.d4.append(Dense(units=units, activation='relu'))
+        else:
+            self.fc1 = []
+            self.fc2 = []
+            self.fc3 = []
+            self.fc4 = []
+            for i in range(len(stacks)*self.num_blocks_per_stack):
+                self.fc1.append(Dense(units=units, activation='relu'))
+                self.fc2.append(Dense(units=units, activation='relu'))
+                self.fc3.append(Dense(units=units, activation='relu'))
+                self.fc4.append(Dense(units=units, activation='relu'))
+        self.lookback_period = lookback_period
+        self.backcast_time_idx, self.forecast_time_idx = get_time_indices(lookback_period, forecast_period)
+
+        self.trend_layer = trend_layer(p=self.num_trend_coefficients,
+                                       t_b=self.backcast_time_idx,
+                                       t_f=self.forecast_time_idx,
+                                       share_theta=self.share_coefficients)
+        self.seasonality_layer = seasonality_layer(p=self.num_trend_coefficients,
+                                                   t_b=self.backcast_time_idx,
+                                                   t_f=self.forecast_time_idx,
+                                                   share_theta=self.share_coefficients)
+        self.generic_layer = generic_layer(p=self.num_trend_coefficients,
+                                                   t_b=self.backcast_time_idx,
+                                                   t_f=self.forecast_time_idx,
+                                                   share_theta=self.share_coefficients)
+        self.layerset = {'trend': self.trend_layer, 'seasonality': self.seasonality_layer, 'generic': self.generic_layer}
+
+        self.layerlist = {'trend': [],'seasonality': [],'generic': []}
+        for i in self.stacks:
+            for j in range(self.num_blocks_per_stack):
+                self.layerlist[i].append(self.layerset[i])
+
+    def call(self, x):
+        for s in range(len(self.stacks)):
+            # If share_weights is true, use the same 4 fully connected
+            # layers across all blocks in the stack.
+            # Loop across the different blocks in the stack.
+            for b in range(self.num_blocks_per_stack):
+
+                if s == 0 and b == 0:
+
+                    # For the first block of the first stack, forward pass the
+                    # input directly through the 4 fully connected layers.
+                    if self.share_weights:
+                        h = self.d10(x)
+                        h = self.d2[s](h)
+                        h = self.d3[s](h)
+                        h = self.d4[s](h)
+
+                    else:
+                        h = self.fc1[s+b](x)
+                        h = self.fc2[s+b](h)
+                        h = self.fc3[s+b](h)
+                        h = self.fc4[s+b](h)
+
+                    # Generate the block backcast and forecast.
+                    backcast_out, forecast_out = self.layerlist[self.stacks[s]][b](h)
+
+                    # Calculate the backcast residual by subtracting the block backcast from the input.
+                    # See Section 3.2 in the N-BEATS paper.
+                    backcast = Subtract()([x[:,-self.lookback_period:], backcast_out])
+
+                    # For the first block of the first stack, no adjustment is applied to the forecast.
+                    forecast = forecast_out
+
+                else:
+                    # For the subsequent blocks and stacks, forward pass the
+                    # backcast residual through the 4 fully connected layers.
+                    if self.share_weights:
+                        h = self.d1[s](backcast)
+                        h = self.d2[s](h)
+                        h = self.d3[s](h)
+                        h = self.d4[s](h)
+
+                    else:
+                        h = self.fc1[s+b](backcast)
+                        h = self.fc2[s+b](h)
+                        h = self.fc3[s+b](h)
+                        h = self.fc4[s+b](h)
+
+                    # Generate the block backcast and forecast.
+                    backcast_out, forecast_out = self.layerlist[self.stacks[s]][b](h)
+
+                    # Substract the current block backcast from the previous block backcast.
+                    # See Section 3.2 in the N-BEATS paper.
+                    backcast = Subtract()([backcast, backcast_out])
+
+                    # Add the current block forecast to the previous block forecast.
+                    # See Section 3.2 in the N-BEATS paper.
+                    forecast = Add()([forecast, forecast_out])
+        return forecast
+
+
+
+
+
+
+class callback(Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        if 'val_loss' in logs.keys():
+            print('epoch: {}, loss: {:,.6f}, val_loss: {:,.6f}'.format(1 + epoch, logs['loss'], logs['val_loss']))
+        else:
+            print('epoch: {}, loss: {:,.6f}'.format(1 + epoch, logs['loss']))
