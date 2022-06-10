@@ -14,8 +14,8 @@ from tensorflow.keras.callbacks import Callback
 from tensorflow import keras
 
 pd.options.mode.chained_assignment = None
-from Nbeats_utils import cast_target_to_array, get_training_sequences, get_time_indices
-from Nbeats_block import trend_layer, seasonality_layer, generic_layer
+from NBeats_utils import cast_target_to_array, get_training_sequences, get_time_indices
+from NBeats_block import trend_layer, seasonality_layer, generic_layer
 
 class nbeats(keras.Model):
 
